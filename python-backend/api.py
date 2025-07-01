@@ -11,19 +11,20 @@ from pydantic import BaseModel
 # Import database client
 from database import db_client
 
-# Import agents and context
-from shared_types import AirlineAgentContext
-from agents import Agent, RunContextWrapper, function_tool
-from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
-
-# Import conference agents
-from conference_agents.conference_agents_definitions import (
+# Import main components
+from main import (
+    triage_agent,
     schedule_agent,
     networking_agent,
-    on_schedule_handoff,
-    on_networking_handoff,
-    add_business_tool
+    conversations,
+    get_or_create_conversation,
+    load_user_context,
+    relevance_guardrail,
+    jailbreak_guardrail
 )
+
+# Import shared types
+from shared_types import AirlineAgentContext
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -60,136 +61,6 @@ class ChatResponse(BaseModel):
     customer_info: Optional[Dict[str, Any]] = None
 
 # =========================
-# GUARDRAILS
-# =========================
-
-@function_tool
-async def relevance_guardrail(input_text: str) -> Dict[str, Any]:
-    """Check if the input is relevant to conference assistance."""
-    conference_keywords = [
-        'conference', 'schedule', 'session', 'speaker', 'networking', 'business',
-        'attendee', 'meeting', 'presentation', 'workshop', 'track', 'room',
-        'registration', 'event', 'agenda', 'program', 'participant'
-    ]
-    
-    input_lower = input_text.lower()
-    is_relevant = any(keyword in input_lower for keyword in conference_keywords)
-    
-    # Also allow greetings and basic questions
-    greetings = ['hello', 'hi', 'help', 'what', 'how', 'when', 'where', 'who', 'can you']
-    if any(greeting in input_lower for greeting in greetings):
-        is_relevant = True
-    
-    return {
-        "reasoning": f"Input contains conference-related keywords: {is_relevant}",
-        "is_relevant": is_relevant
-    }
-
-@function_tool
-async def jailbreak_guardrail(input_text: str) -> Dict[str, Any]:
-    """Check for jailbreak attempts."""
-    jailbreak_patterns = [
-        'ignore', 'forget', 'system', 'prompt', 'instruction', 'override',
-        'bypass', 'pretend', 'roleplay', 'act as', 'you are now'
-    ]
-    
-    input_lower = input_text.lower()
-    is_safe = not any(pattern in input_lower for pattern in jailbreak_patterns)
-    
-    return {
-        "reasoning": f"No jailbreak patterns detected: {is_safe}",
-        "is_safe": is_safe
-    }
-
-# =========================
-# MAIN TRIAGE AGENT
-# =========================
-
-def triage_instructions(
-    run_context: RunContextWrapper[AirlineAgentContext], agent: Agent[AirlineAgentContext]
-) -> str:
-    ctx = run_context.context
-    user_name = ctx.passenger_name or "Attendee"
-    conference_name = ctx.conference_name or "Business Conference 2025"
-    
-    return (
-        f"{RECOMMENDED_PROMPT_PREFIX}\n"
-        f"You are a Conference Assistant for {conference_name}. Welcome {user_name}!\n\n"
-        "You help conference attendees with:\n"
-        "1. **Conference Schedule**: Finding sessions, speakers, timings, rooms, and tracks\n"
-        "2. **Networking**: Connecting with other attendees and exploring business opportunities\n"
-        "3. **General Information**: Basic conference details and assistance\n\n"
-        "**Handoff Guidelines:**\n"
-        "- For schedule-related questions (sessions, speakers, timings, rooms, tracks) → Transfer to Schedule Agent\n"
-        "- For networking questions (finding attendees, businesses, adding business) → Transfer to Networking Agent\n"
-        "- For general greetings and basic info → Handle directly\n\n"
-        "**Important**: Always be helpful and conference-focused. If users ask about non-conference topics, politely redirect them back to conference-related assistance.\n\n"
-        "Keep responses concise and friendly. **Do not describe tool usage or agent transfers in your responses.**"
-    )
-
-# Create handoff functions
-from agents import handoff
-
-@handoff
-async def transfer_to_schedule_agent(
-    context: RunContextWrapper[AirlineAgentContext]
-) -> Agent[AirlineAgentContext]:
-    """Transfer to the Schedule Agent for conference schedule inquiries."""
-    await on_schedule_handoff(context)
-    return schedule_agent
-
-@handoff
-async def transfer_to_networking_agent(
-    context: RunContextWrapper[AirlineAgentContext]
-) -> Agent[AirlineAgentContext]:
-    """Transfer to the Networking Agent for networking and business inquiries."""
-    await on_networking_handoff(context)
-    return networking_agent
-
-# Create the triage agent
-triage_agent = Agent[AirlineAgentContext](
-    name="Triage Agent",
-    model="groq/llama3-8b-8192",
-    handoff_description="Main conference assistant that routes requests to specialized agents.",
-    instructions=triage_instructions,
-    tools=[],
-    handoffs=[transfer_to_schedule_agent, transfer_to_networking_agent],
-    input_guardrails=[relevance_guardrail, jailbreak_guardrail]
-)
-
-# Update other agents to include handoff back to triage
-schedule_agent.handoffs = [
-    handoff(lambda context: triage_agent, description="Transfer back to main conference assistant")
-]
-networking_agent.handoffs = [
-    handoff(lambda context: triage_agent, description="Transfer back to main conference assistant")
-]
-
-# =========================
-# CONVERSATION MANAGEMENT
-# =========================
-
-# In-memory storage for conversations (in production, use a proper database)
-conversations: Dict[str, Dict[str, Any]] = {}
-
-def get_or_create_conversation(conversation_id: Optional[str], account_number: Optional[str]) -> Dict[str, Any]:
-    """Get existing conversation or create a new one."""
-    if not conversation_id:
-        conversation_id = str(uuid.uuid4())
-    
-    if conversation_id not in conversations:
-        conversations[conversation_id] = {
-            "id": conversation_id,
-            "context": AirlineAgentContext(),
-            "current_agent": "Triage Agent",
-            "messages": [],
-            "events": [],
-            "account_number": account_number
-        }
-    
-    return conversations[conversation_id]
-
-# =========================
 # API ENDPOINTS
 # =========================
 
@@ -219,20 +90,9 @@ async def chat_endpoint(request: ChatRequest):
         # Get or create conversation
         conversation = get_or_create_conversation(request.conversation_id, request.account_number)
         
-        # Load user context if account_number is provided
+        # Load user context if account_number is provided and not already loaded
         if request.account_number and not conversation["context"].customer_id:
-            user = await db_client.get_user_by_registration_id(request.account_number)
-            if not user:
-                user = await db_client.get_user_by_qr_code(request.account_number)
-            
-            if user:
-                # Update context with user information
-                conversation["context"].passenger_name = user.get("name")
-                conversation["context"].customer_id = user.get("id")
-                conversation["context"].account_number = user.get("account_number")
-                conversation["context"].customer_email = user.get("email")
-                conversation["context"].is_conference_attendee = user.get("is_conference_attendee", True)
-                conversation["context"].conference_name = user.get("conference_name", "Business Conference 2025")
+            await load_user_context(conversation, request.account_number)
         
         # Handle business form submission
         if "I want to add my business with the following details:" in request.message:
@@ -263,7 +123,7 @@ async def chat_endpoint(request: ChatRequest):
                     if key in field_mapping:
                         business_data[field_mapping[key]] = value
             
-            # Add business using the tool
+            # Add business using the database client
             if business_data and conversation["context"].customer_id:
                 try:
                     success = await db_client.add_business(
@@ -272,14 +132,15 @@ async def chat_endpoint(request: ChatRequest):
                     )
                     
                     if success:
-                        response_message = f"Successfully added your business '{business_data.get('companyName', 'Unknown')}' to the business directory! Other attendees can now find and connect with your business for networking opportunities."
+                        response_message = f"✅ Successfully added your business '{business_data.get('companyName', 'Unknown')}' to the business directory!\n\nYour business is now visible to other conference attendees for networking opportunities. Other participants can find your business when searching by industry, location, or company name.\n\nIs there anything else I can help you with regarding networking or the conference?"
                     else:
-                        response_message = "I encountered an issue adding your business. Please try again or contact support."
+                        response_message = "❌ I encountered an issue adding your business. Please try again or contact support for assistance."
                         
                 except Exception as e:
-                    response_message = f"Error adding business: {str(e)}"
+                    logger.error(f"Error adding business: {e}")
+                    response_message = f"❌ Error adding business: {str(e)}"
             else:
-                response_message = "I couldn't process your business information. Please make sure all required fields are filled out."
+                response_message = "❌ I couldn't process your business information. Please make sure all required fields are filled out correctly."
             
             # Add messages to conversation
             conversation["messages"].append({
@@ -295,25 +156,36 @@ async def chat_endpoint(request: ChatRequest):
             conversation["current_agent"] = "Networking Agent"
         
         else:
-            # Regular message processing would go here
-            # For now, we'll simulate a simple response
+            # Regular message processing
             conversation["messages"].append({
                 "content": request.message,
                 "agent": "User"
             })
             
-            # Simple routing logic
+            # Simple routing logic based on message content
             message_lower = request.message.lower()
             
-            if any(word in message_lower for word in ['schedule', 'session', 'speaker', 'time', 'room', 'track', 'when']):
+            if any(word in message_lower for word in ['schedule', 'session', 'speaker', 'time', 'room', 'track', 'when', 'agenda', 'program']):
                 agent_name = "Schedule Agent"
-                response = "I can help you find conference schedule information. What specific session, speaker, or time are you looking for?"
-            elif any(word in message_lower for word in ['network', 'business', 'attendee', 'connect', 'company', 'find people']):
+                if 'hello' in message_lower or 'hi' in message_lower:
+                    response = f"Hello! I'm the Schedule Agent. I can help you find conference sessions, speakers, and schedule information. What would you like to know about the conference schedule?"
+                else:
+                    response = "I can help you find conference schedule information. You can ask me about:\n\n• **Sessions by speaker** - \"Show me sessions by Alice Wonderland\"\n• **Sessions by topic** - \"Find AI sessions\"\n• **Sessions by room** - \"What's in the Grand Ballroom?\"\n• **Sessions by track** - \"Show me Data Science track\"\n• **Sessions by date** - \"What's happening on July 15th?\"\n\nWhat specific schedule information are you looking for?"
+            elif any(word in message_lower for word in ['network', 'business', 'attendee', 'connect', 'company', 'find people', 'add business', 'register business']):
                 agent_name = "Networking Agent"
-                response = "I can help you connect with other attendees and explore business opportunities. Are you looking for specific people, companies, or would you like to add your own business?"
+                if 'add' in message_lower and 'business' in message_lower:
+                    response = "DISPLAY_BUSINESS_FORM"
+                elif 'hello' in message_lower or 'hi' in message_lower:
+                    response = f"Hello! I'm the Networking Agent. I can help you connect with other conference attendees and explore business opportunities. What would you like to do?"
+                else:
+                    response = "I can help you with networking and business connections. You can ask me to:\n\n• **Find attendees** - \"Find attendees from Chennai\" or \"Show me all attendees\"\n• **Search businesses** - \"Find healthcare businesses\" or \"Show me IT companies\"\n• **Add your business** - \"I want to add my business\"\n• **Get business info** - \"Show me businesses in Mumbai\"\n\nWhat networking assistance do you need?"
             else:
                 agent_name = "Triage Agent"
-                response = f"Hello! I'm your conference assistant. I can help you with:\n\n• **Conference Schedule** - Find sessions, speakers, and timings\n• **Networking** - Connect with attendees and businesses\n\nWhat would you like to know about the conference?"
+                if 'hello' in message_lower or 'hi' in message_lower:
+                    user_name = conversation["context"].passenger_name or "there"
+                    response = f"Hello {user_name}! 👋 Welcome to Business Conference 2025!\n\nI'm your conference assistant and I'm here to help you with:\n\n🗓️ **Conference Schedule** - Find sessions, speakers, timings, and rooms\n🤝 **Networking** - Connect with attendees and explore business opportunities\n\nWhat would you like to know about the conference today?"
+                else:
+                    response = f"I'm your conference assistant for Business Conference 2025. I can help you with:\n\n🗓️ **Conference Schedule** - Find sessions, speakers, timings, and rooms\n🤝 **Networking** - Connect with attendees and explore business opportunities\n\nWhat would you like to know about the conference?"
             
             conversation["messages"].append({
                 "content": response,
@@ -331,7 +203,13 @@ async def chat_endpoint(request: ChatRequest):
                     "account_number": conversation["context"].account_number,
                     "email": conversation["context"].customer_email,
                     "is_conference_attendee": conversation["context"].is_conference_attendee,
-                    "conference_name": conversation["context"].conference_name
+                    "conference_name": conversation["context"].conference_name,
+                    "registration_id": conversation["context"].user_registration_id,
+                    "company": conversation["context"].user_company_name,
+                    "location": conversation["context"].user_location,
+                    "conference_package": conversation["context"].user_conference_package,
+                    "primary_stream": conversation["context"].user_primary_stream,
+                    "secondary_stream": conversation["context"].user_secondary_stream
                 },
                 "bookings": []
             }
@@ -342,27 +220,27 @@ async def chat_endpoint(request: ChatRequest):
             current_agent=conversation["current_agent"],
             messages=conversation["messages"][-2:] if len(conversation["messages"]) >= 2 else conversation["messages"],
             events=conversation.get("events", []),
-            context=conversation["context"].model_dump(),
+            context=conversation["context"].model_dump() if hasattr(conversation["context"], 'model_dump') else conversation["context"].__dict__,
             agents=[
                 {
                     "name": "Triage Agent",
-                    "description": "Main conference assistant",
+                    "description": "Main conference assistant that routes requests",
                     "handoffs": ["Schedule Agent", "Networking Agent"],
                     "tools": [],
                     "input_guardrails": ["relevance_guardrail", "jailbreak_guardrail"]
                 },
                 {
                     "name": "Schedule Agent", 
-                    "description": "Conference schedule information",
+                    "description": "Conference schedule and session information",
                     "handoffs": ["Triage Agent"],
                     "tools": ["get_conference_schedule"],
                     "input_guardrails": []
                 },
                 {
                     "name": "Networking Agent",
-                    "description": "Networking and business connections", 
+                    "description": "Networking, attendees, and business connections", 
                     "handoffs": ["Triage Agent"],
-                    "tools": ["search_attendees", "search_businesses", "add_business"],
+                    "tools": ["search_attendees", "search_businesses", "add_business", "display_business_form"],
                     "input_guardrails": []
                 }
             ],
@@ -374,7 +252,7 @@ async def chat_endpoint(request: ChatRequest):
         
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/")
 async def root():
