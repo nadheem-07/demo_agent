@@ -9,6 +9,10 @@ const nextConfig = {
         destination: "http://127.0.0.1:8000/chat",
       },
       {
+        source: "/user/:path*",
+        destination: "http://127.0.0.1:8000/user/:path*",
+      },
+      {
         source: "/customer/:path*",
         destination: "http://127.0.0.1:8000/customer/:path*",
       },
