@@ -61,15 +61,35 @@ def extract_speaker_from_message(message: str) -> Optional[str]:
     """Extract speaker name from message."""
     message_lower = message.lower()
     
-    # Common speaker names from the database
+    # Common speaker names from the database - check for partial matches
     speakers = [
         "Alice Wonderland", "Bob The Builder", "Charlie Chaplin", "Diana Prince",
         "Eve Harrington", "Frank Sinatra", "Grace Hopper", "Harry Potter",
-        "Ivy League", "Jack Sparrow", "Karen Carpenter", "Liam Neeson"
+        "Ivy League", "Jack Sparrow", "Karen Carpenter", "Liam Neeson",
+        "Mia Wallace", "Noah Wyle", "Olivia Newton", "Peter Pan",
+        "Quinn Fabray", "Rachel Green", "Samwise Gamgee", "Tina Turner",
+        "Ulysses S. Grant", "Victor Von Doom", "Wendy Darling", "Xavier Riddle",
+        "Yara Greyjoy", "Zoe Washburne", "Adam Sandler", "Betty Boop",
+        "Cathy Lane", "David Bowie", "Elsa Frozen", "Fred Flintstone",
+        "George Jetson", "Hannah Montana", "Indiana Jones", "Julia Child",
+        "Kevin Hart", "Leia Organa", "Morpheus Neo", "Nemo Fish",
+        "Oprah Winfrey", "Popeye Sailor", "Queen Elizabeth", "Ron Weasley",
+        "Sherlock Holmes", "Tony Stark", "Uma Thurman", "Vincent Van Gogh",
+        "Walter White", "Yoda Jedi", "Zelda Princess", "Anakin Skywalker",
+        "Bruce Wayne", "Clark Kent", "Darth Vader", "Eliza Doolittle",
+        "Frodo Baggins", "Gollum Precious", "Hermione Granger", "Iron Man",
+        "Jasmine Princess", "King Arthur", "Loki Mischief", "Mickey Mouse",
+        "Nancy Drew", "Olaf Snowman", "Pocahontas", "Quentin Tarantino",
+        "Rocky Balboa", "Snow White", "Tom Cruise", "Ursula Sea"
     ]
     
     for speaker in speakers:
+        # Check for full name or partial matches
+        speaker_parts = speaker.lower().split()
         if speaker.lower() in message_lower:
+            return speaker
+        # Check for first name or last name matches
+        elif any(part in message_lower for part in speaker_parts if len(part) > 3):
             return speaker
     
     return None
@@ -79,13 +99,13 @@ def extract_track_from_message(message: str) -> Optional[str]:
     message_lower = message.lower()
     
     track_keywords = {
-        "AI & ML": ["ai", "ml", "machine learning", "artificial intelligence"],
-        "Cloud Computing": ["cloud", "computing"],
+        "AI & ML": ["ai", "ml", "machine learning", "artificial intelligence", "ai & ml"],
+        "Cloud Computing": ["cloud", "computing", "cloud computing"],
         "Data Science": ["data science", "data", "analytics"],
-        "Web Development": ["web", "development", "frontend", "backend"],
+        "Web Development": ["web", "development", "frontend", "backend", "web development"],
         "Cybersecurity": ["cyber", "security", "cybersecurity"],
-        "Product Management": ["product", "management"],
-        "Startup & Entrepreneurship": ["startup", "entrepreneur"]
+        "Product Management": ["product", "management", "product management"],
+        "Startup & Entrepreneurship": ["startup", "entrepreneur", "entrepreneurship"]
     }
     
     for track, keywords in track_keywords.items():
@@ -111,6 +131,31 @@ def extract_room_from_message(message: str) -> Optional[str]:
     for room, keywords in room_keywords.items():
         if any(keyword in message_lower for keyword in keywords):
             return room
+    
+    return None
+
+def extract_person_name_from_message(message: str) -> Optional[str]:
+    """Extract person name from networking queries."""
+    message_lower = message.lower()
+    
+    # Look for patterns like "tell about [name]", "about [name]", "find [name]"
+    patterns = [
+        r"tell\s+(?:me\s+)?about\s+([A-Za-z\s]+)",
+        r"about\s+([A-Za-z\s]+)",
+        r"find\s+([A-Za-z\s]+)",
+        r"show\s+(?:me\s+)?([A-Za-z\s]+)",
+        r"who\s+is\s+([A-Za-z\s]+)"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, message_lower)
+        if match:
+            name = match.group(1).strip()
+            # Filter out common words that aren't names
+            exclude_words = ['speaker', 'speakers', 'attendee', 'attendees', 'business', 'businesses', 
+                           'company', 'companies', 'session', 'sessions', 'event', 'events']
+            if name.lower() not in exclude_words and len(name) > 2:
+                return name.title()  # Capitalize properly
     
     return None
 
@@ -155,8 +200,12 @@ async def get_conference_schedule_tool(
             filter_text = " and ".join(filters) if filters else "your criteria"
             return f"No conference sessions found for {filter_text}."
 
-        # Format the schedule information
-        result = f"Found {len(schedule)} conference session(s):\n\n"
+        # Limit results to avoid overwhelming response
+        if len(schedule) > 10:
+            schedule = schedule[:10]
+            result = f"Found {len(schedule)} conference sessions (showing first 10):\n\n"
+        else:
+            result = f"Found {len(schedule)} conference session(s):\n\n"
         
         for session in schedule:
             start_time = session.get('start_time', 'TBD')
@@ -222,6 +271,10 @@ async def search_attendees_tool(
                 result += f"Secondary Stream: {details.get('secondary_stream')}\n"
             if details.get('conference_package'):
                 result += f"Conference Package: {details.get('conference_package')}\n"
+            if details.get('email'):
+                result += f"Email: {details.get('email')}\n"
+            if details.get('mobile'):
+                result += f"Mobile: {details.get('mobile')}\n"
             
             result += "\n"
 
@@ -426,8 +479,16 @@ async def execute_schedule_agent(message: str, context: Dict[str, Any]) -> str:
         elif "cloud infrastructure" in message_lower:
             topic = "Scaling Cloud Infrastructure for Airlines"
         
+        # Handle specific queries about speakers
+        if "tell me about speaker" in message_lower or "about speaker" in message_lower:
+            # If no specific speaker mentioned, show all speakers for July 15th
+            if not speaker_name:
+                date_str = "2025-07-15"
+                result = await get_conference_schedule_tool(conference_date=date_str)
+                return f"Here are the speakers for July 15th, 2025:\n\n{result}"
+        
         # If asking about September 1st but no data exists for that date, inform user
-        if "september" in message_lower and not date_str:
+        if "september" in message_lower:
             return "I don't have any conference sessions scheduled for September. The Business Conference 2025 is scheduled for July 15-16, 2025. Would you like to see the sessions for those dates instead?"
         
         # If no specific filters found, check for general queries
@@ -435,7 +496,7 @@ async def execute_schedule_agent(message: str, context: Dict[str, Any]) -> str:
             if "events" in message_lower or "sessions" in message_lower:
                 # Default to July 15th if asking about events without specific date
                 date_str = "2025-07-15"
-            elif "speakers" in message_lower:
+            elif "speakers" in message_lower or "speaker" in message_lower:
                 # Show all speakers for July 15th
                 date_str = "2025-07-15"
         
@@ -463,12 +524,19 @@ async def execute_networking_agent(message: str, context: Dict[str, Any]) -> str
         if ("add" in message_lower and "business" in message_lower) or \
            ("register" in message_lower and "business" in message_lower) or \
            ("new business" in message_lower) or \
-           ("create business" in message_lower):
+           ("create business" in message_lower) or \
+           ("i want to add my business" in message_lower):
             return "DISPLAY_BUSINESS_FORM"
         
         # Handle user's own business lookup - be very specific
         if ("my business" in message_lower or "show about my business" in message_lower) and context.get('customer_id'):
             return await get_user_businesses_tool(context['customer_id'], context.get('passenger_name'))
+        
+        # Handle specific person lookup
+        person_name = extract_person_name_from_message(message)
+        if person_name and ("tell" in message_lower or "about" in message_lower):
+            # Search for specific person
+            return await search_attendees_tool(name=person_name)
         
         # Handle attendee search
         if "attendee" in message_lower or "show attendees" in message_lower or "find attendees" in message_lower:
@@ -513,7 +581,7 @@ async def execute_networking_agent(message: str, context: Dict[str, Any]) -> str
             return await get_organization_info_tool(context.get('organization_id'))
         
         # Default networking response
-        return "I can help you with networking and business connections. You can ask me to:\n\n• **Find attendees** - \"Find attendees from Chennai\" or \"Show me all attendees\"\n• **Search businesses** - \"Find healthcare businesses\" or \"Show me IT companies\"\n• **Add your business** - \"I want to add my business\"\n• **View your businesses** - \"Show my business\"\n• **Get business info** - \"Show me businesses in Mumbai\"\n\nWhat networking assistance do you need?"
+        return "I can help you with networking and business connections. You can ask me to:\n\n• **Find attendees** - \"Find attendees from Chennai\" or \"Show me all attendees\"\n• **Search businesses** - \"Find healthcare businesses\" or \"Show me IT companies\"\n• **Add your business** - \"I want to add my business\"\n• **View your businesses** - \"Show my business\"\n• **Get business info** - \"Show me businesses in Mumbai\"\n• **Find specific people** - \"Tell me about [person name]\"\n\nWhat networking assistance do you need?"
         
     except Exception as e:
         logger.error(f"Error in execute_networking_agent: {e}")

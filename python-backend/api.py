@@ -159,11 +159,11 @@ async def chat_endpoint(request: ChatRequest):
                 "agent": "User"
             })
             
-            # Simple routing logic based on message content
+            # Improved routing logic based on message content
             message_lower = request.message.lower()
             
-            # Determine which agent to use
-            if any(word in message_lower for word in ['schedule', 'session', 'speaker', 'time', 'room', 'track', 'when', 'agenda', 'program', 'july', 'date', 'events', 'september']):
+            # Determine which agent to use with better keyword detection
+            if any(word in message_lower for word in ['schedule', 'session', 'speaker', 'time', 'room', 'track', 'when', 'agenda', 'program', 'july', 'date', 'events', 'september', 'tell me about speaker', 'about speaker']):
                 agent_name = "Schedule Agent"
                 try:
                     # Convert context to dict for agent execution
@@ -186,7 +186,7 @@ async def chat_endpoint(request: ChatRequest):
                     logger.error(f"Error executing agent {agent_name}: {e}")
                     response = "I'm having trouble processing your request. Please try again or rephrase your question."
                     
-            elif any(word in message_lower for word in ['network', 'business', 'attendee', 'connect', 'company', 'find people', 'add business', 'register business', 'show attendees', 'my business']):
+            elif any(word in message_lower for word in ['network', 'business', 'attendee', 'connect', 'company', 'find people', 'add business', 'register business', 'show attendees', 'my business', 'tell about', 'tell me about', 'about']):
                 agent_name = "Networking Agent"
                 try:
                     # Convert context to dict for agent execution
