@@ -30,6 +30,8 @@ def parse_date_from_message(message: str) -> Optional[str]:
         return "2025-07-15"
     elif "july 16" in message_lower or "16th july" in message_lower or "july 16th" in message_lower:
         return "2025-07-16"
+    elif "july 1" in message_lower or "1st july" in message_lower or "july 1st" in message_lower:
+        return None  # No data for July 1st
     elif "september 1" in message_lower or "1st september" in message_lower or "september 1st" in message_lower:
         return "2025-09-01"
     elif "september" in message_lower:
@@ -52,6 +54,8 @@ def parse_date_from_message(message: str) -> Optional[str]:
                 return "2025-07-15"
             elif "july 16" in date_str:
                 return "2025-07-16"
+            elif "july 1" in date_str:
+                return None  # No data for July 1st
             elif "september 1" in date_str:
                 return "2025-09-01"
     
@@ -159,6 +163,24 @@ def extract_person_name_from_message(message: str) -> Optional[str]:
     
     return None
 
+def determine_query_type(message: str) -> str:
+    """Determine what type of information the user is asking for."""
+    message_lower = message.lower()
+    
+    # Check for specific query types
+    if "rooms" in message_lower and "room" not in message_lower:
+        return "rooms_list"
+    elif "speakers" in message_lower and not any(word in message_lower for word in ["session", "topic", "time"]):
+        return "speakers_list"
+    elif "tracks" in message_lower:
+        return "tracks_list"
+    elif "sessions" in message_lower or "events" in message_lower:
+        return "sessions"
+    elif "tell me about speaker" in message_lower:
+        return "speaker_details"
+    else:
+        return "general"
+
 # =========================
 # TOOL FUNCTIONS (Direct implementations)
 # =========================
@@ -168,7 +190,8 @@ async def get_conference_schedule_tool(
     topic: Optional[str] = None,
     conference_room_name: Optional[str] = None,
     track_name: Optional[str] = None,
-    conference_date: Optional[str] = None
+    conference_date: Optional[str] = None,
+    query_type: str = "general"
 ) -> str:
     """Get conference schedule information based on various filters."""
     try:
@@ -200,10 +223,26 @@ async def get_conference_schedule_tool(
             filter_text = " and ".join(filters) if filters else "your criteria"
             return f"No conference sessions found for {filter_text}."
 
-        # Limit results to avoid overwhelming response
-        if len(schedule) > 10:
-            schedule = schedule[:10]
-            result = f"Found {len(schedule)} conference sessions (showing first 10):\n\n"
+        # Handle different query types
+        if query_type == "rooms_list":
+            # Return unique room names
+            rooms = list(set(session.get('conference_room_name', 'Unknown') for session in schedule))
+            return f"Conference rooms available:\n\n" + "\n".join(f"• {room}" for room in sorted(rooms))
+        
+        elif query_type == "speakers_list":
+            # Return unique speaker names
+            speakers = list(set(session.get('speaker_name', 'Unknown') for session in schedule))
+            return f"Conference speakers:\n\n" + "\n".join(f"• {speaker}" for speaker in sorted(speakers))
+        
+        elif query_type == "tracks_list":
+            # Return unique track names
+            tracks = list(set(session.get('track_name', 'Unknown') for session in schedule))
+            return f"Conference tracks:\n\n" + "\n".join(f"• {track}" for track in sorted(tracks))
+
+        # For detailed session information, limit results
+        if len(schedule) > 5:
+            schedule = schedule[:5]
+            result = f"Found {len(schedule)} conference sessions (showing first 5):\n\n"
         else:
             result = f"Found {len(schedule)} conference session(s):\n\n"
         
@@ -466,47 +505,72 @@ async def execute_schedule_agent(message: str, context: Dict[str, Any]) -> str:
     try:
         message_lower = message.lower()
         
+        # Determine query type
+        query_type = determine_query_type(message)
+        
         # Extract parameters from message using helper functions
         speaker_name = extract_speaker_from_message(message)
         track_name = extract_track_from_message(message)
         room_name = extract_room_from_message(message)
         date_str = parse_date_from_message(message)
         
-        # Extract topic keywords
-        topic = None
-        if "future of ai" in message_lower:
-            topic = "The Future of AI in Travel"
-        elif "cloud infrastructure" in message_lower:
-            topic = "Scaling Cloud Infrastructure for Airlines"
+        # Handle specific date queries
+        if "july 1" in message_lower:
+            return "No conference sessions are scheduled for July 1st. The Business Conference 2025 is scheduled for July 15-16, 2025. Would you like to see the sessions for those dates?"
+        
+        # If asking about September but no data exists for that date, inform user
+        if "september" in message_lower:
+            return "No conference sessions are scheduled for September. The Business Conference 2025 is scheduled for July 15-16, 2025. Would you like to see the sessions for those dates instead?"
         
         # Handle specific queries about speakers
+        if query_type == "speakers_list" or ("speakers" in message_lower and not date_str):
+            # Show all speakers for both days
+            result1 = await get_conference_schedule_tool(conference_date="2025-07-15", query_type="speakers_list")
+            result2 = await get_conference_schedule_tool(conference_date="2025-07-16", query_type="speakers_list")
+            
+            # Combine and deduplicate speakers
+            speakers_15 = set()
+            speakers_16 = set()
+            
+            schedule_15 = await db_client.get_conference_schedule(conference_date=date(2025, 7, 15))
+            schedule_16 = await db_client.get_conference_schedule(conference_date=date(2025, 7, 16))
+            
+            for session in schedule_15:
+                speakers_15.add(session.get('speaker_name', 'Unknown'))
+            for session in schedule_16:
+                speakers_16.add(session.get('speaker_name', 'Unknown'))
+            
+            all_speakers = sorted(speakers_15.union(speakers_16))
+            return f"Conference speakers ({len(all_speakers)} total):\n\n" + "\n".join(f"• {speaker}" for speaker in all_speakers)
+        
+        # Handle rooms query
+        if query_type == "rooms_list":
+            return await get_conference_schedule_tool(query_type="rooms_list")
+        
+        # Handle tracks query
+        if query_type == "tracks_list":
+            return await get_conference_schedule_tool(query_type="tracks_list")
+        
+        # Handle "tell me about speaker" - show speaker details for July 15th
         if "tell me about speaker" in message_lower or "about speaker" in message_lower:
-            # If no specific speaker mentioned, show all speakers for July 15th
             if not speaker_name:
                 date_str = "2025-07-15"
-                result = await get_conference_schedule_tool(conference_date=date_str)
-                return f"Here are the speakers for July 15th, 2025:\n\n{result}"
-        
-        # If asking about September 1st but no data exists for that date, inform user
-        if "september" in message_lower:
-            return "I don't have any conference sessions scheduled for September. The Business Conference 2025 is scheduled for July 15-16, 2025. Would you like to see the sessions for those dates instead?"
+                result = await get_conference_schedule_tool(conference_date=date_str, query_type="sessions")
+                return f"Here are the speaker sessions for July 15th, 2025:\n\n{result}"
         
         # If no specific filters found, check for general queries
-        if not any([speaker_name, track_name, room_name, date_str, topic]):
+        if not any([speaker_name, track_name, room_name, date_str]):
             if "events" in message_lower or "sessions" in message_lower:
                 # Default to July 15th if asking about events without specific date
-                date_str = "2025-07-15"
-            elif "speakers" in message_lower or "speaker" in message_lower:
-                # Show all speakers for July 15th
                 date_str = "2025-07-15"
         
         # Call the tool function
         result = await get_conference_schedule_tool(
             speaker_name=speaker_name,
-            topic=topic,
             conference_room_name=room_name,
             track_name=track_name,
-            conference_date=date_str
+            conference_date=date_str,
+            query_type=query_type
         )
         
         return result
