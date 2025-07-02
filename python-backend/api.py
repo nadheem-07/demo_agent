@@ -163,7 +163,7 @@ async def chat_endpoint(request: ChatRequest):
             message_lower = request.message.lower()
             
             # Determine which agent to use
-            if any(word in message_lower for word in ['schedule', 'session', 'speaker', 'time', 'room', 'track', 'when', 'agenda', 'program', 'july', 'date', 'events']):
+            if any(word in message_lower for word in ['schedule', 'session', 'speaker', 'time', 'room', 'track', 'when', 'agenda', 'program', 'july', 'date', 'events', 'september']):
                 agent_name = "Schedule Agent"
                 try:
                     # Convert context to dict for agent execution
@@ -186,7 +186,7 @@ async def chat_endpoint(request: ChatRequest):
                     logger.error(f"Error executing agent {agent_name}: {e}")
                     response = "I'm having trouble processing your request. Please try again or rephrase your question."
                     
-            elif any(word in message_lower for word in ['network', 'business', 'attendee', 'connect', 'company', 'find people', 'add business', 'register business', 'show attendees']):
+            elif any(word in message_lower for word in ['network', 'business', 'attendee', 'connect', 'company', 'find people', 'add business', 'register business', 'show attendees', 'my business']):
                 agent_name = "Networking Agent"
                 try:
                     # Convert context to dict for agent execution

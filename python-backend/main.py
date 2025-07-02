@@ -5,8 +5,9 @@ from __future__ import annotations as _annotations
 import os
 import logging
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, date
 import uuid
+import re
 
 # Import shared context type from shared_types.py
 from shared_types import AirlineAgentContext
@@ -15,6 +16,103 @@ from database import db_client
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# =========================
+# HELPER FUNCTIONS
+# =========================
+
+def parse_date_from_message(message: str) -> Optional[str]:
+    """Parse date from natural language message."""
+    message_lower = message.lower()
+    
+    # Handle specific date formats
+    if "july 15" in message_lower or "15th july" in message_lower or "july 15th" in message_lower:
+        return "2025-07-15"
+    elif "july 16" in message_lower or "16th july" in message_lower or "july 16th" in message_lower:
+        return "2025-07-16"
+    elif "september 1" in message_lower or "1st september" in message_lower or "september 1st" in message_lower:
+        return "2025-09-01"
+    elif "september" in message_lower:
+        return "2025-09-01"  # Default to September 1st if just "september" is mentioned
+    
+    # Handle "events on [date]" pattern
+    date_patterns = [
+        r"events?\s+on\s+(\w+\s+\d+)",
+        r"sessions?\s+on\s+(\w+\s+\d+)",
+        r"speakers?\s+on\s+(\w+\s+\d+)",
+        r"(\w+\s+\d+(?:st|nd|rd|th)?)"
+    ]
+    
+    for pattern in date_patterns:
+        match = re.search(pattern, message_lower)
+        if match:
+            date_str = match.group(1)
+            # Try to parse common date formats
+            if "july 15" in date_str:
+                return "2025-07-15"
+            elif "july 16" in date_str:
+                return "2025-07-16"
+            elif "september 1" in date_str:
+                return "2025-09-01"
+    
+    return None
+
+def extract_speaker_from_message(message: str) -> Optional[str]:
+    """Extract speaker name from message."""
+    message_lower = message.lower()
+    
+    # Common speaker names from the database
+    speakers = [
+        "Alice Wonderland", "Bob The Builder", "Charlie Chaplin", "Diana Prince",
+        "Eve Harrington", "Frank Sinatra", "Grace Hopper", "Harry Potter",
+        "Ivy League", "Jack Sparrow", "Karen Carpenter", "Liam Neeson"
+    ]
+    
+    for speaker in speakers:
+        if speaker.lower() in message_lower:
+            return speaker
+    
+    return None
+
+def extract_track_from_message(message: str) -> Optional[str]:
+    """Extract track name from message."""
+    message_lower = message.lower()
+    
+    track_keywords = {
+        "AI & ML": ["ai", "ml", "machine learning", "artificial intelligence"],
+        "Cloud Computing": ["cloud", "computing"],
+        "Data Science": ["data science", "data", "analytics"],
+        "Web Development": ["web", "development", "frontend", "backend"],
+        "Cybersecurity": ["cyber", "security", "cybersecurity"],
+        "Product Management": ["product", "management"],
+        "Startup & Entrepreneurship": ["startup", "entrepreneur"]
+    }
+    
+    for track, keywords in track_keywords.items():
+        if any(keyword in message_lower for keyword in keywords):
+            return track
+    
+    return None
+
+def extract_room_from_message(message: str) -> Optional[str]:
+    """Extract room name from message."""
+    message_lower = message.lower()
+    
+    room_keywords = {
+        "Grand Ballroom": ["grand ballroom", "ballroom"],
+        "Executive Suite 1": ["executive suite 1", "executive suite"],
+        "Executive Suite 2": ["executive suite 2"],
+        "Breakout Room A": ["breakout room a", "breakout a"],
+        "Breakout Room B": ["breakout room b", "breakout b"],
+        "Innovation Hub": ["innovation hub", "hub"],
+        "Networking Lounge": ["networking lounge", "lounge"]
+    }
+    
+    for room, keywords in room_keywords.items():
+        if any(keyword in message_lower for keyword in keywords):
+            return room
+    
+    return None
 
 # =========================
 # TOOL FUNCTIONS (Direct implementations)
@@ -190,25 +288,18 @@ async def get_user_businesses_tool(
 ) -> str:
     """Get all businesses for a specific user."""
     try:
-        # If no user_name provided, use current user
-        if not user_name:
-            if not user_id:
-                return "No user specified and no current user context available."
-        else:
-            # Search for user by name first
-            users = await db_client.get_user_details_by_name(user_name)
-            if not users:
-                return f"No user found with name '{user_name}'."
-            user_id = users[0].get('id')
+        # Always use the provided user_id for current user
+        if not user_id:
+            return "No user specified and no current user context available."
 
         businesses = await db_client.get_user_businesses(user_id)
 
         if not businesses:
-            user_text = user_name or "the current user"
+            user_text = user_name or "you"
             return f"No businesses found for {user_text}."
 
         # Format business information
-        result = f"Found {len(businesses)} business(es) for {user_name or 'the current user'}:\n\n"
+        result = f"Found {len(businesses)} business(es) for {user_name or 'you'}:\n\n"
         
         for business in businesses:
             details = business.get('details', {})
@@ -225,6 +316,8 @@ async def get_user_businesses_tool(
                 result += f"Position: {details.get('positionTitle')}\n"
             if details.get('briefDescription'):
                 result += f"Description: {details.get('briefDescription')}\n"
+            if details.get('productsOrServices'):
+                result += f"Products/Services: {details.get('productsOrServices')}\n"
             if details.get('web'):
                 result += f"Website: {details.get('web')}\n"
             
@@ -320,59 +413,31 @@ async def execute_schedule_agent(message: str, context: Dict[str, Any]) -> str:
     try:
         message_lower = message.lower()
         
-        # Extract parameters from message
-        speaker_name = None
-        topic = None
-        room_name = None
-        track_name = None
-        date_str = None
-        
-        # Simple keyword extraction
-        if "alice" in message_lower:
-            speaker_name = "Alice Wonderland"
-        elif "bob" in message_lower:
-            speaker_name = "Bob The Builder"
-        elif "charlie" in message_lower:
-            speaker_name = "Charlie Chaplin"
-        
-        if "ai" in message_lower or "ml" in message_lower:
-            track_name = "AI & ML"
-        elif "cloud" in message_lower:
-            track_name = "Cloud Computing"
-        elif "data" in message_lower:
-            track_name = "Data Science"
-        elif "web" in message_lower:
-            track_name = "Web Development"
-        elif "cyber" in message_lower:
-            track_name = "Cybersecurity"
-        elif "product" in message_lower:
-            track_name = "Product Management"
-        elif "startup" in message_lower:
-            track_name = "Startup & Entrepreneurship"
-        
-        if "grand ballroom" in message_lower:
-            room_name = "Grand Ballroom"
-        elif "executive suite" in message_lower:
-            room_name = "Executive Suite 1"
-        elif "breakout room a" in message_lower:
-            room_name = "Breakout Room A"
-        elif "breakout room b" in message_lower:
-            room_name = "Breakout Room B"
-        elif "innovation hub" in message_lower:
-            room_name = "Innovation Hub"
-        elif "networking lounge" in message_lower:
-            room_name = "Networking Lounge"
-        
-        if "july 15" in message_lower or "2025-07-15" in message_lower:
-            date_str = "2025-07-15"
-        elif "july 16" in message_lower or "2025-07-16" in message_lower:
-            date_str = "2025-07-16"
+        # Extract parameters from message using helper functions
+        speaker_name = extract_speaker_from_message(message)
+        track_name = extract_track_from_message(message)
+        room_name = extract_room_from_message(message)
+        date_str = parse_date_from_message(message)
         
         # Extract topic keywords
+        topic = None
         if "future of ai" in message_lower:
             topic = "The Future of AI in Travel"
         elif "cloud infrastructure" in message_lower:
             topic = "Scaling Cloud Infrastructure for Airlines"
+        
+        # If asking about September 1st but no data exists for that date, inform user
+        if "september" in message_lower and not date_str:
+            return "I don't have any conference sessions scheduled for September. The Business Conference 2025 is scheduled for July 15-16, 2025. Would you like to see the sessions for those dates instead?"
+        
+        # If no specific filters found, check for general queries
+        if not any([speaker_name, track_name, room_name, date_str, topic]):
+            if "events" in message_lower or "sessions" in message_lower:
+                # Default to July 15th if asking about events without specific date
+                date_str = "2025-07-15"
+            elif "speakers" in message_lower:
+                # Show all speakers for July 15th
+                date_str = "2025-07-15"
         
         # Call the tool function
         result = await get_conference_schedule_tool(
@@ -394,9 +459,16 @@ async def execute_networking_agent(message: str, context: Dict[str, Any]) -> str
     try:
         message_lower = message.lower()
         
-        # Handle business form request
-        if "add" in message_lower and "business" in message_lower:
+        # Handle business form request - be more specific about when to show form
+        if ("add" in message_lower and "business" in message_lower) or \
+           ("register" in message_lower and "business" in message_lower) or \
+           ("new business" in message_lower) or \
+           ("create business" in message_lower):
             return "DISPLAY_BUSINESS_FORM"
+        
+        # Handle user's own business lookup - be very specific
+        if ("my business" in message_lower or "show about my business" in message_lower) and context.get('customer_id'):
+            return await get_user_businesses_tool(context['customer_id'], context.get('passenger_name'))
         
         # Handle attendee search
         if "attendee" in message_lower or "show attendees" in message_lower or "find attendees" in message_lower:
@@ -411,32 +483,37 @@ async def execute_networking_agent(message: str, context: Dict[str, Any]) -> str
                 
                 if location_idx != -1 and location_idx + 1 < len(words):
                     location = words[location_idx + 1]
-                    # Search by location (this would need to be implemented in the database function)
+                    # For now, just return all attendees since location filtering needs more complex implementation
                     return await search_attendees_tool()
                 else:
                     return await search_attendees_tool()
             else:
                 return await search_attendees_tool()
         
-        # Handle business search
-        if "business" in message_lower or "company" in message_lower:
+        # Handle general business search (not user's own business)
+        if ("business" in message_lower or "company" in message_lower or "companies" in message_lower) and \
+           not ("my business" in message_lower or "show about my business" in message_lower):
             if "healthcare" in message_lower:
                 return await search_businesses_tool(sector="Healthcare")
-            elif "it" in message_lower:
-                return await search_businesses_tool(sector="IT")
+            elif "pharma" in message_lower:
+                return await search_businesses_tool(sector="Pharma & Healthcare")
+            elif "it" in message_lower or "technology" in message_lower:
+                return await search_businesses_tool(sector="Technology")
             elif "mumbai" in message_lower:
                 return await search_businesses_tool(location="Mumbai")
             elif "chennai" in message_lower:
                 return await search_businesses_tool(location="Chennai")
+            elif "tamil nadu" in message_lower or "tamilnadu" in message_lower:
+                return await search_businesses_tool(location="Tamil Nadu")
             else:
                 return await search_businesses_tool()
         
-        # Handle user business lookup
-        if "my business" in message_lower and context.get('customer_id'):
-            return await get_user_businesses_tool(context['customer_id'])
+        # Handle organization info
+        if "organization" in message_lower and context.get('organization_id'):
+            return await get_organization_info_tool(context.get('organization_id'))
         
         # Default networking response
-        return "I can help you with networking and business connections. You can ask me to:\n\n• **Find attendees** - \"Find attendees from Chennai\" or \"Show me all attendees\"\n• **Search businesses** - \"Find healthcare businesses\" or \"Show me IT companies\"\n• **Add your business** - \"I want to add my business\"\n• **Get business info** - \"Show me businesses in Mumbai\"\n\nWhat networking assistance do you need?"
+        return "I can help you with networking and business connections. You can ask me to:\n\n• **Find attendees** - \"Find attendees from Chennai\" or \"Show me all attendees\"\n• **Search businesses** - \"Find healthcare businesses\" or \"Show me IT companies\"\n• **Add your business** - \"I want to add my business\"\n• **View your businesses** - \"Show my business\"\n• **Get business info** - \"Show me businesses in Mumbai\"\n\nWhat networking assistance do you need?"
         
     except Exception as e:
         logger.error(f"Error in execute_networking_agent: {e}")
